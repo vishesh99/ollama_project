@@ -11,7 +11,8 @@ from langchain.vectorstores.faiss import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pdf2image import convert_from_path
 import pytesseract
-import pdfplumber
+from PyPDF2 import PdfReader
+import re
 
 TEXT_SPLITTER = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
@@ -86,18 +87,36 @@ def load_documents(path: str) -> List[Document]:
         print(f"Loaded {len(loaded_docs)} {file_type} files")
         docs.extend(loaded_docs)
 
-    # Use pdfplumber for text and tables
+    # Use PyPDF2 for text extraction
     pdf_files = [os.path.join(path, file) for file in os.listdir(path) if file.endswith('.pdf')]
     for pdf_file in pdf_files:
-        docs.extend(extract_text_and_tables_from_pdf(pdf_file))
+        docs.extend(extract_text_from_pdf(pdf_file))
 
     print(f"Total documents loaded: {len(docs)}")
     return docs
 
+def extract_text_from_pdf(pdf_path: str) -> List[Document]:
+    """
+    Extracts text from a PDF file using PyPDF2.
+
+    Args:
+        pdf_path (str): The path to the PDF file.
+
+    Returns:
+        List[Document]: A list of documents with extracted text.
+    """
+    documents = []
+    reader = PdfReader(pdf_path)
+    for page_number, page in enumerate(reader.pages):
+        text = page.extract_text()
+        if text:
+            cleaned_text = clean_text(text)
+            documents.append(Document(page_content=cleaned_text, metadata={"source": pdf_path, "page": page_number}))
+    return documents
+
 def extract_text_and_tables_from_pdf(pdf_path: str) -> List[Document]:
     """
-    Extracts text and tables from a PDF file using pdfplumber.
-    Also performs OCR on scanned PDFs.
+    Extracts text and tables from a PDF file using OCR and PyPDF2.
 
     Args:
         pdf_path (str): The path to the PDF file.
@@ -105,29 +124,10 @@ def extract_text_and_tables_from_pdf(pdf_path: str) -> List[Document]:
     Returns:
         List[Document]: A list of documents with extracted text and tables.
     """
-    documents = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_number, page in enumerate(pdf.pages):
-            text = page.extract_text()
-            if text:
-                documents.append(Document(page_content=text, metadata={"source": pdf_path, "page": page_number}))
-
-            tables = page.extract_tables()
-            for table in tables:
-                # Replace None values with empty strings
-                table_text = "\n".join(["\t".join(cell if cell is not None else "" for cell in row) for row in table])
-                if table_text.strip():
-                    documents.append(Document(page_content=table_text, metadata={"source": pdf_path, "page": page_number}))
-
-            # If no text is found, use OCR
-            if not text.strip() and not tables:
-                image = page.to_image()
-                ocr_text = pytesseract.image_to_string(image.original)
-                if ocr_text.strip():
-                    documents.append(Document(page_content=ocr_text, metadata={"source": pdf_path, "page": page_number}))
-
+    documents = extract_text_from_pdf(pdf_path)
+    if not documents:
+        documents = extract_text_from_images_in_pdf(pdf_path)
     return documents
-
 
 def extract_text_from_images_in_pdf(pdf_path: str) -> List[Document]:
     """
@@ -144,5 +144,22 @@ def extract_text_from_images_in_pdf(pdf_path: str) -> List[Document]:
     for page_number, image in enumerate(images):
         text = pytesseract.image_to_string(image)
         if text.strip():  # Only add if text is not empty
-            documents.append(Document(page_content=text, metadata={"source": pdf_path, "page": page_number}))
+            cleaned_text = clean_text(text)
+            documents.append(Document(page_content=cleaned_text, metadata={"source": pdf_path, "page": page_number}))
     return documents
+
+def clean_text(text: str) -> str:
+    """
+    Cleans the extracted text by keeping only English characters and removing extra spaces.
+
+    Args:
+        text (str): The text to clean.
+
+    Returns:
+        str: The cleaned text.
+    """
+    # Keep only English letters, numbers, and common punctuation
+    text = re.sub(r'[^a-zA-Z0-9\s.,!?\'"-]', ' ', text)
+    # Remove extra spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
